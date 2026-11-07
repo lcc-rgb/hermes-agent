@@ -298,6 +298,7 @@ hermes cron cancel <job_id_or_name>
 hermes cron remove <job_id_or_name>
 hermes cron edit <job_id_or_name> [...flags]
 hermes cron status
+hermes cron admission-status <job_id> <request_id>
 hermes cron tick
 ```
 
@@ -309,6 +310,7 @@ What they do:
 - `cancel` — stop the job's **current** run (see [Stopping a run in flight](#stopping-a-run-in-flight))
 - `remove` — delete it entirely
 - `edit` — modify schedule, prompt, delivery, etc.
+- `admission-status` — read one fire's owner admission (`queued`, `started`, `terminal`, or UNKNOWN) without submitting, recovering, or changing the pause
 - `tick` — run one scheduler pass and exit (for a system crontab or other external
   scheduler). **The gateway must be running:** agent jobs execute inside the gateway, and a
   tick never starts one. With no gateway up, agent jobs are skipped with a logged reason
@@ -432,6 +434,8 @@ hermes cron status
 ```
 
 `hermes cron status` reports whether the scheduler is alive (gateway process, ticker heartbeat, last successful tick) and the soonest scheduled run across your active jobs, ordered by actual instant even when jobs store different UTC offsets. A `next_run_at` that is already more than 15 minutes in the past is never shown as an upcoming "Next run": `cron status` prints `⚠ Next run <time> is OVERDUE — passed 7h ago but the job has not fired`, `cron list` and the in-chat `/cron list` label the row `Overdue:`, the dashboard and the Desktop cron panel (including a Bot's Routines card) show `Overdue since`, and when the scheduler has stopped ticking `status` (with the gateway down) and the dashboard Cron page also say when it last ticked. That is the signature of a scheduler that stopped ticking — restart the gateway (`hermes gateway restart`) so the next tick picks the overdue job up, or run it right away with `hermes cron run <id>`.
+
+`hermes cron admission-status <job_id> <request_id>` asks the already-running gateway, over the public `cron.status` RPC, for one fire whose admission receipt is in the local journal. `<request_id>` is that fire's execution id. The command does not submit, recover, cancel, reconcile, deliver, or change the job's pause, and it does not start a gateway. Exit 0 means the owner answered `queued`, `started`, or `terminal`. Exit 2 means the execution is still UNKNOWN — do not start another run from that result. A journal with no receipt stays UNKNOWN: resolving it would use `cron.recover`, which restores the session, and that restore is not part of this command. `--json` prints the same sanitized report (status codes and booleans; no prompt or output text).
 
 For a named profile served by the default-profile multiplexer, `hermes cron status` names that scheduler host and reports the named profile's own heartbeat health. Missing or stale heartbeats point to `hermes --profile default gateway restart`. `cron list` and `cron create` also warn when that heartbeat is missing or stale; `cron status` additionally checks the last successful tick and reports tick errors.
 

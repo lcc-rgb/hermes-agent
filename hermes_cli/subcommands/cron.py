@@ -210,6 +210,15 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     # cron status
     cron_subparsers.add_parser("status", help="Check if cron scheduler is running")
 
+    cron_admission = cron_subparsers.add_parser(
+        "admission-status",
+        help="Read one admitted cron fire from the running owner (no submit, recover, or pause change)",
+    )
+    cron_admission.add_argument("job_id", help="Job id of the fire")
+    cron_admission.add_argument(
+        "request_id", help="Execution id of that fire (the admission journal's request_id)")
+    _flag(cron_admission, "--json", help="Print the sanitized report as JSON")
+
     cron_runs = cron_subparsers.add_parser(
         "runs", aliases=["history"], help="Show durable execution attempts")
     cron_runs.add_argument("job_id", nargs="?", help="Optional job ID filter")

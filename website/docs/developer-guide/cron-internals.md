@@ -462,7 +462,10 @@ hermes cron pause <job_id>          # Pause a running job
 hermes cron resume <job_id>         # Resume a paused job
 hermes cron run <job_id>            # Trigger immediate execution
 hermes cron remove <job_id>         # Delete a job
+hermes cron admission-status <job_id> <request_id>
 ```
+
+`admission-status` is a client of the public `cron.status` verb. It reads one stored receipt and does not call `cron.recover`. A fire with no receipt stays UNKNOWN on the running owner, because recover always restores the session and a side-effect-free lookup by job and request is not on that owner's catalog.
 
 ## Related Docs
 
