@@ -212,7 +212,7 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
 
     cron_admission = cron_subparsers.add_parser(
         "admission-status",
-        help="Read one admitted cron fire from the running owner (no submit, recover, or pause change)",
+        help="Read one cron admission via cron.inspect (no status, recover, submit, or pause change)",
     )
     cron_admission.add_argument("job_id", help="Job id of the fire")
     cron_admission.add_argument(

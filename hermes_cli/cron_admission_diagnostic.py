@@ -1,33 +1,23 @@
-"""Read-only diagnostic of one cron admission through the public ``cron.status`` RPC.
+"""Read-only diagnostic of one cron admission through ``cron.inspect``.
 
-An immediate fire that was admitted and then lost its client (``Gateway connection failed;
-no local fallback``, history UNKNOWN, protective pause) still has one authoritative
-source: the owner's admission row. This command reports that row. It does not submit,
-recover, cancel, reconcile, deliver, pause, or write the journal.
+The public ``cron.status`` and ``cron.recover`` verbs are not used. ``cron.status``
+carries a session id, and dispatch adopts any session that is not in the live map
+before the handler runs; the handler's ``authorize`` then restores that session.
+``session.list`` / ``session.active_list`` can observe the live map without
+restoring a session that is absent from it, but that observation is not a lock:
+the session can leave the map before a later ``cron.status``. A journal receipt
+and gateway discovery do not establish that the session is mounted. This command
+therefore never calls ``cron.status``.
 
-Live owner, no restart
-----------------------
-``cron.status`` is already on the public ``hermes-gateway-v1`` catalog
-(``session_id`` + ``admission_id``). A client dials an owner
-``discover_gateway_endpoint`` already found and calls only that verb. Nothing here
-starts a gateway or restarts the owner. When the fire's session is still mounted,
-that verb is a ledger read (``authorize`` restores only a session missing from the
-live map; ``dispatch`` runs a compression catch-up only in that same case).
+``cron.inspect`` takes only ``job_id`` and ``request_id``. Dispatch rejects a
+``session_id`` on that verb before adoption, and the handler reads the admission
+row without ``authorize``. An owner that does not serve the verb answers
+``unknown_method``. That admission stays UNKNOWN. There is no fallback.
 
-A journal with no receipt cannot be addressed by ``cron.status``. ``cron.recover``
-can look the fire up by job and request, and it always calls ``restore_local_session``.
-That is a persistence change, so this command does not call it. The verdict stays
-UNKNOWN. A side-effect-free lookup by ``(job_id, request_id)`` would be a new
-canonical read that omits ``session_id`` (so dispatch does not adopt the session)
-and does not call ``authorize``. It would return the same status projection as
-``cron.status``, and UNKNOWN when the row is absent or its outcome is unknown —
-never ``missing``, which is recover's definite non-admission. That verb is not
-added here: the process already running would not serve it until it restarts, and
-an ``unknown_method`` answer must not be reported as a resolution of the live fire.
-
-UNKNOWN stays unresolved. A discovery state, a refused RPC, a timeout, or an empty
-journal is an attach or client fact. None of those is evidence that a process is
-gone or that the fire did not run.
+An absent row and an admission whose status is ``unknown`` are both UNKNOWN.
+Neither is ``cron.recover``'s ``missing``. A discovery state, a refusal, a
+timeout, or an unreadable journal is an attach or client fact. None of those is
+evidence that a process is gone or that the fire did not run.
 """
 from __future__ import annotations
 
@@ -50,7 +40,11 @@ class JournalUnreadable(Exception):
 
 
 class OwnerUnreachable(Exception):
-    """``cron.status`` was not answered. Says nothing about process liveness."""
+    """``cron.inspect`` was not answered. Says nothing about process liveness."""
+
+
+class OwnerVerbUnavailable(Exception):
+    """This owner does not serve ``cron.inspect``. Do not call ``cron.status`` or ``cron.recover``."""
 
 
 class OwnerRefused(Exception):
@@ -119,7 +113,7 @@ def _terminal_success(result):
 
 
 def interpret_status(payload) -> AdmissionDiagnostic:
-    """Project one ``cron.status`` result. Drops output text, prompts, and unknown flags."""
+    """Project one ``cron.inspect`` result. Drops output text, prompts, and unknown flags."""
     if not isinstance(payload, dict):
         return _unknown("malformed_status", queried=True)
     status = payload.get("status")
@@ -133,11 +127,11 @@ def interpret_status(payload) -> AdmissionDiagnostic:
         if success is None:
             return _unknown("malformed_status", queried=True)
         return AdmissionDiagnostic(
-            verdict="authoritative", evidence="cron_status", queried=True, status="terminal",
+            verdict="authoritative", evidence="cron_inspect", queried=True, status="terminal",
             terminal_success=success, progress_observed=_progress(payload), job_flags=flags,
         )
     return AdmissionDiagnostic(
-        verdict="authoritative", evidence="cron_status", queried=True, status=status,
+        verdict="authoritative", evidence="cron_inspect", queried=True, status=status,
         progress_observed=_progress(payload), job_flags=flags,
     )
 
@@ -172,19 +166,20 @@ def load_journal(job_id, request_id):
     return record
 
 
-def _receipt(record, job_id, request_id):
+def _journal_block(record, job_id, request_id):
+    """An evidence code when the local journal forbids a query, else None.
+
+    A missing journal does not block: the command-line identity is the query, and a receipt
+    is not sent. A conflicting journal is not used to guess which fire to read.
+    """
+    if record is None:
+        return None
     if not isinstance(record, dict):
-        return "journal_unreadable", None
+        return "journal_unreadable"
     params = record.get("params")
     if not isinstance(params, dict) or params.get("job_id") != job_id or params.get("request_id") != request_id:
-        return "identity_conflict", None
-    receipt = record.get("receipt")
-    if not isinstance(receipt, dict):
-        return "no_receipt", None
-    session_id, admission_id = receipt.get("session_id"), receipt.get("admission_id")
-    if not _safe_id(session_id) or not _safe_id(admission_id):
-        return "no_receipt", None
-    return None, (session_id, admission_id)
+        return "identity_conflict"
+    return None
 
 
 def _attach_fields(discovery):
@@ -194,18 +189,19 @@ def _attach_fields(discovery):
     }
 
 
-def diagnose_record(record, job_id, request_id, *, discover, call_status, attachable_fn) -> AdmissionDiagnostic:
-    """Decide from an already-loaded journal. ``discover`` and ``call_status`` perform the only I/O."""
-    problem, receipt = _receipt(record, job_id, request_id)
-    if problem:
-        return _unknown(problem)
+def diagnose_record(record, job_id, request_id, *, discover, call_owner, attachable_fn) -> AdmissionDiagnostic:
+    """Decide from an already-loaded journal. ``discover`` and ``call_owner`` perform the only I/O."""
+    blocked = _journal_block(record, job_id, request_id)
+    if blocked:
+        return _unknown(blocked)
     discovery = discover()
     fields = _attach_fields(discovery)
     if not attachable_fn(discovery) or getattr(discovery, "endpoint", None) is None:
         return _unknown("owner_not_attachable", **fields)
-    session_id, admission_id = receipt
     try:
-        payload = call_status(discovery.endpoint, session_id, admission_id)
+        payload = call_owner(discovery.endpoint, job_id, request_id)
+    except OwnerVerbUnavailable:
+        return _unknown("owner_verb_unavailable", queried=True, **fields)
     except OwnerRefused as exc:
         return _unknown("owner_refused", queried=True, owner_reason=exc.reason, **fields)
     except OwnerUnreachable:
@@ -225,9 +221,13 @@ def _discover():
     return discover_gateway_endpoint(get_hermes_home())
 
 
-def query_cron_status(endpoint, session_id, admission_id):
-    """One ``cron.status`` against an already-discovered owner. Never starts a gateway."""
-    if endpoint is None or not _safe_id(session_id) or not _safe_id(admission_id):
+def query_cron_inspect(endpoint, job_id, request_id):
+    """One ``cron.inspect`` against an already-discovered owner.
+
+    Never starts a gateway. Never sends ``cron.status``, ``cron.recover``, ``cron.submit``, or
+    ``cron.cancel``. ``unknown_method`` means this running owner cannot be read safely.
+    """
+    if endpoint is None or not _safe_id(job_id) or not _safe_id(request_id):
         raise OwnerUnreachable
     import asyncio
 
@@ -235,54 +235,52 @@ def query_cron_status(endpoint, session_id, admission_id):
 
     async def ask():
         async with connect_gateway(endpoint) as client:
-            return await client.rpc("cron.status", session_id=session_id, admission_id=admission_id)
+            return await client.rpc("cron.inspect", job_id=job_id, request_id=request_id)
 
     try:
         return asyncio.run(ask())
     except GatewayRPCError as exc:
+        if exc.code == -32601 or str(exc) == "unknown_method":
+            raise OwnerVerbUnavailable from None
         raise OwnerRefused(str(exc)) from None
     except (GatewayClientError, TimeoutError, OSError):
         raise OwnerUnreachable from None
 
 
-def diagnose(job_id, request_id, *, load=load_journal, discover=None, call_status=None,
+def diagnose(job_id, request_id, *, load=load_journal, discover=None, call_owner=None,
              attachable_fn=None) -> AdmissionDiagnostic:
-    """Diagnose one fire. Default I/O is the real journal, discovery, and ``cron.status``."""
+    """Diagnose one fire. Default I/O is the real journal, discovery, and ``cron.inspect``."""
     if not _safe_id(job_id) or not _safe_id(request_id):
         return _unknown("invalid_identity")
     if discover is None:
         discover = _discover
-    if call_status is None:
-        call_status = query_cron_status
+    if call_owner is None:
+        call_owner = query_cron_inspect
     if attachable_fn is None:
         from hermes_cli.gateway_runtime import attachable as attachable_fn
     try:
         record = load(job_id, request_id)
     except JournalUnreadable:
         return _unknown("journal_unreadable")
-    if record is None:
-        return _unknown("no_journal")
     return diagnose_record(
-        record, job_id, request_id, discover=discover, call_status=call_status, attachable_fn=attachable_fn,
+        record, job_id, request_id, discover=discover, call_owner=call_owner, attachable_fn=attachable_fn,
     )
 
 
 _EVIDENCE_TEXT = {
     "invalid_identity": "The job id or request id is not a single token of letters, digits, underscore, or hyphen. Nothing was read.",
     "journal_unreadable": "The local admission journal could not be read. Execution remains UNKNOWN.",
-    "no_journal": "No local admission journal exists for this job and request. Execution remains UNKNOWN.",
     "identity_conflict": "The local journal identity does not match this job and request. Nothing was queried. Execution remains UNKNOWN.",
-    "no_receipt": (
-        "The local journal has no admission receipt, so cron.status cannot be addressed. "
-        "cron.recover was not called, because that verb restores the session. "
-        "Execution remains UNKNOWN. This fire is not diagnosable on the already-running owner without that restore."
-    ),
     "owner_not_attachable": "Discovery did not yield an attachable owner. Execution remains UNKNOWN. The discovery state is an attach result only.",
-    "owner_unreachable": "The owner did not return cron.status. Execution remains UNKNOWN. A failed attach is an attach result only.",
-    "owner_refused": "The owner refused cron.status. Execution remains UNKNOWN. A refusal leaves the admission unresolved.",
+    "owner_unreachable": "The owner did not return cron.inspect. Execution remains UNKNOWN. A failed attach is an attach result only.",
+    "owner_verb_unavailable": (
+        "The running owner does not serve cron.inspect. The admission was not read. "
+        "cron.status and cron.recover were not called. Execution remains UNKNOWN until that owner is restarted onto this verb."
+    ),
+    "owner_refused": "The owner refused cron.inspect. Execution remains UNKNOWN. A refusal leaves the admission unresolved.",
     "owner_status_unknown": "The owner reports this admission as unknown. Execution remains UNKNOWN.",
     "malformed_status": "The owner answer failed validation. Execution remains UNKNOWN.",
-    "cron_status": "The owner answered cron.status for the stored receipt.",
+    "cron_inspect": "The owner answered cron.inspect for this job and request.",
 }
 
 
@@ -328,16 +326,12 @@ def render_text(report: AdmissionDiagnostic, job_id, request_id) -> str:
         lines.append(f"owner_reason={report.owner_reason}")
     lines.append(_EVIDENCE_TEXT[report.evidence])
     if report.queried:
-        lines.append("This command sent cron.status.")
+        lines.append("This command sent cron.inspect.")
     else:
         lines.append("This command sent no cron verb.")
-    lines.append("cron.submit, cron.recover, and cron.cancel were not called.")
-    lines.append("This command did not write the journal, change the pause, reconcile, or deliver.")
-    lines.append(
-        "On the running owner, cron.status restores a local session that is not in its live map. "
-        "A mounted admission is a ledger read. Removing that restore needs an owner change and a restart, "
-        "which this command does not perform."
-    )
+    lines.append("cron.status, cron.submit, cron.recover, and cron.cancel were not called.")
+    lines.append("This command does not fall back to cron.status or cron.recover.")
+    lines.append("This command did not write the journal, restore a session, change the pause, reconcile, or deliver.")
     if report.verdict != "authoritative":
         lines.append("UNKNOWN stays unresolved. Do not start another run from this report.")
     return "\n".join(lines)

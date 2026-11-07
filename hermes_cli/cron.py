@@ -995,7 +995,7 @@ def cron_notepad(args) -> int:
 
 
 def cron_admission_status(args) -> int:
-    """Report one fire's owner admission. Read-only: no submit, recover, pause, or journal write."""
+    """Report one fire via cron.inspect. Does not call cron.status or cron.recover, and does not write."""
     from hermes_cli.cron_admission_diagnostic import diagnose, render_json, render_text
 
     report = diagnose(args.job_id, args.request_id)

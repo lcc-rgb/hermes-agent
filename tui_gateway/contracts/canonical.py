@@ -417,6 +417,26 @@ canonical_method("cron.status", params=CronAdmissionParams, result=CronStatusRes
                  doc="Status and, once terminal, the result of one cron admission.")
 
 
+class CronInspectParams(Params):
+    """One fire's job and request. No ``session_id``: dispatch adopts any session id before the handler."""
+
+    job_id: str
+    request_id: str
+
+
+class CronInspectResult(OpenModel):
+    """A ledger read. ``status='unknown'`` is an absent row or an unknown outcome, never ``missing``."""
+
+    status: str
+    result: list[JsonValue] | None = None
+    job_flags: dict[str, JsonValue] | None = None
+    progress_at: float | None = None
+
+
+canonical_method("cron.inspect", params=CronInspectParams, result=CronInspectResult,
+                 doc="Read one cron admission by job and request. Does not restore, submit, or cancel.")
+
+
 class CronCancelResult(Result):
     ok: bool
 

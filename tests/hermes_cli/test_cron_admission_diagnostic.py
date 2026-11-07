@@ -10,10 +10,11 @@ from hermes_cli.cron_admission_diagnostic import (
     AdmissionDiagnostic,
     OwnerRefused,
     OwnerUnreachable,
+    OwnerVerbUnavailable,
     diagnose,
     interpret_status,
     load_journal,
-    query_cron_status,
+    query_cron_inspect,
     render_json,
     render_text,
 )
@@ -122,8 +123,8 @@ def test_started_is_authoritative_without_touching_the_home(monkeypatch):
         calls.append("discover")
         return _ready()
 
-    def call_status(endpoint, session_id, admission_id):
-        calls.append((endpoint.api_origin, session_id, admission_id))
+    def call_owner(endpoint, job_id, request_id):
+        calls.append((endpoint.api_origin, job_id, request_id))
         return {"status": "started", "result": None, "progress_at": 4, "job": {"prompt": _SECRET}}
 
     def explode(*_args, **_kwargs):
@@ -134,11 +135,17 @@ def test_started_is_authoritative_without_touching_the_home(monkeypatch):
     monkeypatch.setattr("cron.scheduler_authority.pause_for_unknown", explode)
     monkeypatch.setattr("cron.scheduler_authority.reconcile_pending", explode)
     monkeypatch.setattr("hermes_cli.gateway_runtime.ensure_gateway_runtime", explode)
-    report = diagnose("job", "fire", discover=discover, call_status=call_status, attachable_fn=lambda item: True)
-    assert report.verdict == "authoritative" and report.status == "started" and report.queried is True
+    monkeypatch.setattr(
+        "hermes_cli.cron_admission_diagnostic.query_cron_inspect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("default query used")),
+    )
+    report = diagnose("job", "fire", discover=discover, call_owner=call_owner, attachable_fn=lambda item: True)
+    assert report.verdict == "authoritative" and report.evidence == "cron_inspect"
+    assert report.status == "started" and report.queried is True
     assert report.exit_code() == 0
     assert calls[0] == "discover"
-    assert calls[1][1:] == ("local-" + "a" * 64, "b" * 32)
+    assert calls[1][1:] == ("job", "fire")
+    assert "local-" + "a" * 64 not in render_json(report)
     assert path.read_bytes() == before
     assert _snapshot(home) == home_before
     text = render_text(report, "job", "fire")
@@ -147,14 +154,14 @@ def test_started_is_authoritative_without_touching_the_home(monkeypatch):
 
 
 def test_refusal_is_not_a_missing_admission():
-    def call_status(*_args):
+    def call_owner(*_args):
         raise OwnerRefused("permission_denied")
 
     report = diagnose(
         "job", "fire",
         load=lambda *_args: {"params": {"job_id": "job", "request_id": "fire"},
                              "receipt": {"session_id": "local-a", "admission_id": "admit"}},
-        discover=_ready, call_status=call_status, attachable_fn=lambda item: True,
+        discover=_ready, call_owner=call_owner, attachable_fn=lambda item: True,
     )
     assert report.verdict == "unknown" and report.evidence == "owner_refused"
     assert report.owner_reason == "permission_denied" and report.status is None
@@ -163,35 +170,43 @@ def test_refusal_is_not_a_missing_admission():
     _assert_clean(text)
 
 
-def test_no_receipt_does_not_query_or_recover():
-    def discover():
-        raise AssertionError("discover")
+def test_no_receipt_still_uses_inspect_and_not_status():
+    seen = []
 
-    def call_status(*_args):
-        raise AssertionError("rpc")
+    def call_owner(endpoint, job_id, request_id):
+        seen.append((job_id, request_id))
+        return {"status": "queued", "result": None}
 
     report = diagnose(
         "job", "fire",
         load=lambda *_args: {"params": {"job_id": "job", "request_id": "fire", "extra_prompt": _SECRET},
                              "receipt": None},
-        discover=discover, call_status=call_status, attachable_fn=lambda item: True,
+        discover=_ready, call_owner=call_owner, attachable_fn=lambda item: True,
     )
-    assert report == AdmissionDiagnostic(verdict="unknown", evidence="no_receipt")
+    assert seen == [("job", "fire")]
+    assert report.verdict == "authoritative" and report.evidence == "cron_inspect"
     text = render_text(report, "job", "fire")
-    assert "not diagnosable on the already-running owner" in text
-    assert "sent no cron verb" in text
+    assert "sent cron.inspect" in text
+    assert "does not fall back" in text
     _assert_clean(text)
 
 
-def test_missing_journal_does_not_claim_the_fire_is_absent():
-    report = diagnose("job", "fire", load=lambda *_args: None, discover=lambda: (_ for _ in ()).throw(AssertionError("discover")),
-                      call_status=lambda *_args: (_ for _ in ()).throw(AssertionError("rpc")))
-    assert report.evidence == "no_journal" and report.queried is False
+def test_missing_journal_queries_inspect_without_claiming_absence():
+    seen = []
+
+    def call_owner(endpoint, job_id, request_id):
+        seen.append((job_id, request_id))
+        return {"status": "unknown", "result": None}
+
+    report = diagnose("job", "fire", load=lambda *_args: None, discover=_ready, call_owner=call_owner,
+                      attachable_fn=lambda item: True)
+    assert seen == [("job", "fire")]
+    assert report.evidence == "owner_status_unknown" and report.verdict == "unknown"
     _assert_clean(render_text(report, "job", "fire"))
 
 
 def test_discovery_absent_does_not_connect(monkeypatch):
-    def call_status(*_args):
+    def call_owner(*_args):
         raise AssertionError("connected")
 
     monkeypatch.setattr("hermes_cli.gateway_runtime.ensure_gateway_runtime", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("started")))
@@ -199,7 +214,7 @@ def test_discovery_absent_does_not_connect(monkeypatch):
         "job", "fire",
         load=lambda *_args: {"params": {"job_id": "job", "request_id": "fire"},
                              "receipt": {"session_id": "local-a", "admission_id": "admit"}},
-        discover=_absent, call_status=call_status,
+        discover=_absent, call_owner=call_owner,
     )
     assert report.verdict == "unknown" and report.evidence == "owner_not_attachable"
     assert report.discovery_state == "absent" and report.queried is False
@@ -210,14 +225,14 @@ def test_discovery_absent_does_not_connect(monkeypatch):
 
 
 def test_connection_failure_message_is_not_repeated():
-    def call_status(*_args):
+    def call_owner(*_args):
         raise OwnerUnreachable
 
     report = diagnose(
         "job", "fire",
         load=lambda *_args: {"params": {"job_id": "job", "request_id": "fire"},
                              "receipt": {"session_id": "local-a", "admission_id": "admit"}},
-        discover=_ready, call_status=call_status, attachable_fn=lambda item: True,
+        discover=_ready, call_owner=call_owner, attachable_fn=lambda item: True,
     )
     assert report.evidence == "owner_unreachable" and report.queried is True
     text = render_text(report, "job", "fire") + render_json(report)
@@ -231,7 +246,7 @@ def test_identity_conflict_skips_the_owner():
         load=lambda *_args: {"params": {"job_id": "other", "request_id": "fire", "extra_prompt": _SECRET},
                              "receipt": {"session_id": "local-a", "admission_id": "admit"}},
         discover=lambda: (_ for _ in ()).throw(AssertionError("discover")),
-        call_status=lambda *_args: (_ for _ in ()).throw(AssertionError("rpc")),
+        call_owner=lambda *_args: (_ for _ in ()).throw(AssertionError("rpc")),
     )
     assert report.evidence == "identity_conflict"
     _assert_clean(render_text(report, "job", "fire"))
@@ -266,7 +281,7 @@ def test_symlink_journal_fails_closed(tmp_path, monkeypatch):
     assert target.read_text(encoding="utf-8").count(_SECRET) == 1
 
 
-def test_query_sends_only_cron_status_to_the_discovered_endpoint(monkeypatch):
+def test_query_sends_only_cron_inspect_to_the_discovered_endpoint(monkeypatch):
     from hermes_cli import gateway_client
 
     seen = {}
@@ -289,12 +304,13 @@ def test_query_sends_only_cron_status_to_the_discovered_endpoint(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("started a gateway")),
     )
     endpoint = _endpoint()
-    assert query_cron_status(endpoint, "local-a", "admit") == {"status": "queued", "result": [_SECRET]}
+    assert query_cron_inspect(endpoint, "job", "fire") == {"status": "queued", "result": [_SECRET]}
     assert seen["endpoint"] is endpoint
-    assert seen["method"] == "cron.status"
-    assert set(seen["params"]) == {"session_id", "admission_id"}
+    assert seen["method"] == "cron.inspect"
+    assert set(seen["params"]) == {"job_id", "request_id"}
+    assert seen["params"] == {"job_id": "job", "request_id": "fire"}
     with pytest.raises(OwnerUnreachable):
-        query_cron_status(None, "local-a", "admit")
+        query_cron_inspect(None, "job", "fire")
     assert seen["calls"] == 1
 
 
@@ -311,8 +327,39 @@ def test_query_maps_the_connection_failure_without_its_text(monkeypatch):
 
     monkeypatch.setattr(gateway_client, "connect_gateway", connected)
     with pytest.raises(OwnerUnreachable) as caught:
-        query_cron_status(_endpoint(), "local-a", "admit")
+        query_cron_inspect(_endpoint(), "job", "fire")
     assert "no local fallback" not in str(caught.value)
+
+
+def test_unknown_method_does_not_fall_back(monkeypatch):
+    from hermes_cli import gateway_client
+
+    seen = []
+
+    class Client:
+        async def rpc(self, method, **params):
+            seen.append((method, params))
+            raise gateway_client.GatewayRPCError("unknown_method", code=-32601)
+
+    @asynccontextmanager
+    async def connected(endpoint=None, subject=None, *, max_size=8 * 1024 * 1024):
+        yield Client()
+
+    monkeypatch.setattr(gateway_client, "connect_gateway", connected)
+    with pytest.raises(OwnerVerbUnavailable):
+        query_cron_inspect(_endpoint(), "job", "fire")
+    assert seen == [("cron.inspect", {"job_id": "job", "request_id": "fire"})]
+    report = diagnose(
+        "job", "fire", load=lambda *_args: None, discover=_ready,
+        call_owner=lambda *_args: (_ for _ in ()).throw(OwnerVerbUnavailable()),
+        attachable_fn=lambda item: True,
+    )
+    assert report.verdict == "unknown" and report.evidence == "owner_verb_unavailable"
+    text = render_text(report, "job", "fire")
+    assert "does not serve cron.inspect" in text
+    assert "cron.status, cron.submit, cron.recover, and cron.cancel were not called." in text
+    assert "does not fall back to cron.status or cron.recover." in text
+    _assert_clean(text)
 
 
 def test_cli_json_uses_the_diagnostic_exit_code(capsys, monkeypatch):

@@ -15667,6 +15667,79 @@
         "title": "CronCancelResult",
         "type": "object"
       },
+      "CronInspectParams": {
+        "additionalProperties": false,
+        "description": "One fire's job and request. No ``session_id``: dispatch adopts any session id before the handler.",
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "request_id"
+        ],
+        "title": "CronInspectParams",
+        "type": "object"
+      },
+      "CronInspectResult": {
+        "additionalProperties": true,
+        "description": "A ledger read. ``status='unknown'`` is an absent row or an unknown outcome, never ``missing``.",
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Result"
+          },
+          "job_flags": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Job Flags"
+          },
+          "progress_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Progress At"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "CronInspectResult",
+        "type": "object"
+      },
       "CronJobRow": {
         "additionalProperties": true,
         "description": "``tools/cronjob_job_args.py::_format_job``.",
@@ -48837,6 +48910,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/CronCancelResult"
+        }
+      }
+    },
+    {
+      "name": "cron.inspect",
+      "summary": "Read one cron admission by job and request. Does not restore, submit, or cancel.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/CronInspectParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/CronInspectResult"
         }
       }
     },
