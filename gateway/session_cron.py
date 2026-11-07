@@ -158,10 +158,41 @@ CRON_SESSION_READ_ONLY_SURFACE = {'layer': 'gateway', 'code': 'cron_session_read
 RUN_JOB_FLAGS = ('_model_unreachable', '_quota_hold_seconds')
 
 
+def _inspect(authority, actor, params):
+    """Ledger read of one fire. No restore, no submit, no cancel, no session id on the wire."""
+    if (set(params) != {'job_id', 'request_id'}
+            or any(not isinstance(params[key], str) or not params[key] or len(params[key]) > 256
+                   for key in ('job_id', 'request_id'))):
+        raise RuntimeStoreError('invalid_params')
+    from hermes_state_keys import cron_request_id, local_identity
+    from hermes_state_runtime import find_session_admission
+    request_id = cron_request_id(params['job_id'], params['request_id'])
+    sid = local_identity(authority.profile_id, actor.subject, request_id)
+    row = find_session_admission(
+        authority.db, principal_id=actor.subject, session_id=sid, request_id=request_id)
+    if row is None:
+        # Absent and unknown are the same verdict: neither is recover's definite ``missing``.
+        return {'status': 'unknown', 'result': None, 'job_flags': None, 'progress_at': None}
+    result, flags = None, {}
+    if row['status'] == 'terminal':
+        from gateway.session_results import admission_result
+        saved = admission_result(authority.db, row['admission_id'])
+        result = saved['result'].get('cron_result') if saved else None
+        flags = (saved['result'].get('cron_job_flags') or {}) if saved else {}
+        if result is None:
+            result = [False, '', '', row.get('outcome') or 'unknown_execution']
+    from cron.scheduler_liveness import owner_progress
+    return {'status': row['status'], 'result': result, 'job_flags': flags,
+            'progress_at': owner_progress.get(row['request_id'].rsplit(':', 1)[-1])}
+
+
 async def operation(authority, name, params, actor=None):
     actor = _actor(authority, actor)
     from gateway.session_authorities import require_serving
     require_serving(authority)  # released ownership: nothing here is ours to touch
+    if name == 'inspect':
+        # No session id, so dispatch does not adopt, and this read does not authorize (that restores).
+        return _inspect(authority, actor, params)
     # Only new work is fenced by a drain. ``recover``/``status``/``cancel`` observe or stop work
     # already admitted, which the drain is waiting for: refusing them makes the firer give up
     # (CronExecutionUnknown pauses the job) on every restart that overlaps a cron run.

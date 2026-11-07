@@ -462,7 +462,10 @@ hermes cron pause <job_id>          # Pause a running job
 hermes cron resume <job_id>         # Resume a paused job
 hermes cron run <job_id>            # Trigger immediate execution
 hermes cron remove <job_id>         # Delete a job
+hermes cron admission-status <job_id> <request_id>
 ```
+
+`admission-status` calls only `cron.inspect` (`job_id`, `request_id`). That verb reads the admission row and does not restore a session. `cron.status` and `cron.recover` are not fallbacks: `cron.status` adopts and restores a session that is not in the live map, and a prior live listing does not keep it there. An owner that does not serve `cron.inspect` leaves the fire UNKNOWN until it is restarted onto this verb. An absent row is `unknown`, not recover's `missing`.
 
 ## Related Docs
 

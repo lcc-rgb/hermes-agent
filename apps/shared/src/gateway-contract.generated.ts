@@ -4971,6 +4971,19 @@ export interface CronAdmissionParams {
   session_id: string
   admission_id: string
 }
+/** One fire's job and request. No ``session_id``: dispatch adopts any session id before the handler. */
+export interface CronInspectParams {
+  job_id: string
+  request_id: string
+}
+/** A ledger read. ``status='unknown'`` is an absent row or an unknown outcome, never ``missing``. */
+export interface CronInspectResult {
+  status: string
+  result?: unknown[] | null
+  job_flags?: Record<string, unknown> | null
+  progress_at?: number | null
+  [key: string]: unknown
+}
 export interface CronCancelResult {
   ok: boolean
 }
@@ -6953,6 +6966,8 @@ export interface CanonicalRpcMethods {
   'config.set': { params: CanonicalConfigSetParams; result: ConfigSetResult }
   /** Cancel a queued cron admission or latch cancellation on a started one. */
   'cron.cancel': { params: CronAdmissionParams; result: CronCancelResult }
+  /** Read one cron admission by job and request. Does not restore, submit, or cancel. */
+  'cron.inspect': { params: CronInspectParams; result: CronInspectResult }
   /** Re-observe a firing after a scheduler restart (same request identity). */
   'cron.recover': { params: CronRunParams; result: CronStatusResult }
   /** Status and, once terminal, the result of one cron admission. */
@@ -7030,6 +7045,7 @@ export const CANONICAL_RPC_METHODS = [
   'config.get',
   'config.set',
   'cron.cancel',
+  'cron.inspect',
   'cron.recover',
   'cron.status',
   'cron.submit',

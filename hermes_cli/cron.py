@@ -994,6 +994,15 @@ def cron_notepad(args) -> int:
         return 1
 
 
+def cron_admission_status(args) -> int:
+    """Report one fire via cron.inspect. Does not call cron.status or cron.recover, and does not write."""
+    from hermes_cli.cron_admission_diagnostic import diagnose, render_json, render_text
+
+    report = diagnose(args.job_id, args.request_id)
+    print(render_json(report) if getattr(args, "json", False) else render_text(report, args.job_id, args.request_id))
+    return report.exit_code()
+
+
 def cron_cancel(args) -> int:
     """Stop a job's live run. The schedule is untouched — the next fire still happens."""
     result = _cron_api(action="cancel", job_id=args.job_id,
@@ -1019,6 +1028,7 @@ _CRON_SUBCOMMANDS = {
     "doctor": lambda a: cron_doctor(),
     "tick": lambda a: cron_tick(),
     "runs": lambda a: cron_runs(getattr(a, "job_id", None), getattr(a, "limit", 20)) or 0,
+    "admission-status": lambda a: cron_admission_status(a),
     "incidents": lambda a: cron_incidents(a),
     "notepad": lambda a: cron_notepad(a),
     "create": lambda a: cron_create(a),
@@ -1041,5 +1051,6 @@ def cron_command(args):
     if handler is not None:
         return handler(args)
     print(f"Unknown cron command: {subcmd}\n"
-          "Usage: hermes cron [list|create|edit|pause|resume|run|cancel|remove|status|runs|doctor|tick]")
+          "Usage: hermes cron [list|create|edit|pause|resume|run|cancel|remove|status|"
+          "admission-status|runs|doctor|tick]")
     sys.exit(1)
