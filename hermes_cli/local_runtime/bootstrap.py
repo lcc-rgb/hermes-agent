@@ -297,33 +297,34 @@ _APPLIED_SLOTS_UNSET = object()
 
 
 def _running_generation_slots() -> tuple[int | None, bool]:
-    """``(slots, usable)`` from the config file on disk.
+    """``(slots, usable)`` from the machine-root config, never the caller's profile.
 
-    A rejected value is ``(None, False)`` and callers leave the running preset
-    alone. An unreadable file is ``(None, True)``: a window re-plan still runs
-    and does not invent a slot cap.
+    A rejected or unreadable root file is ``(None, False)``: boot does not
+    start, and the idle sweep does not rewrite the preset. A missing file or
+    a missing key is null and usable (automatic slots).
     """
     global _rejected_generation_slots_token
     from hermes_cli.local_runtime.generation_slots import (
-        GenerationSlotsError, resolve_generation_slots)
+        GenerationSlotsError, MachineConfigUnreadable, machine_generation_slots)
 
-    raw = None
     try:
-        from hermes_cli.config import load_config_readonly
-
-        section = (load_config_readonly() or {}).get("local_runtime") or {}
-        raw = section.get("generation_slots")
-        slots = resolve_generation_slots(raw)
+        slots = machine_generation_slots()
     except GenerationSlotsError as exc:
-        token = repr(raw)
+        token = f"rejected:{exc}"
         if token != _rejected_generation_slots_token:
-            logger.error("local_runtime.generation_slots rejected (%s); "
-                         "leaving the running preset unchanged", exc)
+            logger.error("local_runtime.generation_slots in the machine-root "
+                         "config was rejected (%s); the running preset is unchanged "
+                         "and a new server is not started", exc)
             _rejected_generation_slots_token = token
         return None, False
-    except Exception as exc:
-        logger.debug("generation_slots config unreadable (%s); not forcing a slot change", exc)
-        return None, True
+    except MachineConfigUnreadable as exc:
+        token = f"unreadable:{exc}"
+        if token != _rejected_generation_slots_token:
+            logger.error("machine-root config could not be read for "
+                         "generation_slots (%s); the running preset is unchanged "
+                         "and a new server is not started", exc)
+            _rejected_generation_slots_token = token
+        return None, False
     _rejected_generation_slots_token = None
     return slots, True
 
@@ -469,13 +470,8 @@ def ensure_local_runtime(config: dict, force: bool = False) -> object | None:
     if _SUPERVISOR is not None:
         return _SUPERVISOR
 
-    from hermes_cli.local_runtime.generation_slots import (
-        GenerationSlotsError, resolve_generation_slots)
-
-    try:
-        generation_slots = resolve_generation_slots(section.get("generation_slots"))
-    except GenerationSlotsError as exc:
-        logger.error("local_runtime.generation_slots rejected (%s); managed server not started", exc)
+    generation_slots, slots_ok = _running_generation_slots()
+    if not slots_ok:
         return None
 
     try:

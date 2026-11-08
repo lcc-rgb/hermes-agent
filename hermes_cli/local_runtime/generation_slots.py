@@ -10,6 +10,13 @@ A model that already pins ``parallel`` (the DFlash draft, which is one slot
 for its own recurrent-state copies) keeps that pin and does not gain a
 ``kv-unified`` key.
 
+The value is read only from the machine root ``config.yaml``
+(``get_default_hermes_root()``). The managed server, its presets, and its
+models live there. A profile ``config.yaml`` is a separate file: profiles do
+not inherit this key, and a caller profile, a context-local home override, or
+a worker snapshot cannot set it. Cold start and the owner's idle sweep use
+that same root file, including a Curator turn scoped to a profile.
+
 The router argv is not part of this setting. ``local_runtime.extra_args`` is
 not read. Nothing here queues an HTTP request or loads a model.
 """
@@ -21,6 +28,45 @@ SINGLE_GENERATION_SLOT = 1
 
 class GenerationSlotsError(ValueError):
     """``local_runtime.generation_slots`` is not null and not ``1``."""
+
+
+class MachineConfigUnreadable(OSError):
+    """The machine-root config file exists but could not be parsed."""
+
+
+def machine_generation_slots() -> int | None:
+    """Slot count from the machine-root config only.
+
+    Missing file or missing key is null (automatic slots). A value other than
+    null or ``1`` raises ``GenerationSlotsError``. An unreadable file raises
+    ``MachineConfigUnreadable``. The active profile, ``HERMES_HOME`` when it
+    points at ``profiles/<name>``, and any config dict a caller passed in are
+    not consulted.
+    """
+    from hermes_constants import get_default_hermes_root
+    from hermes_cli.config_backend import read_config_doc_readonly
+
+    path = get_default_hermes_root() / "config.yaml"
+    try:
+        data = read_config_doc_readonly(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise MachineConfigUnreadable(str(exc)) from exc
+    except Exception as exc:
+        raise MachineConfigUnreadable(str(exc)) from exc
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise MachineConfigUnreadable("machine-root config.yaml is not a mapping")
+    section = data.get("local_runtime")
+    if section is None:
+        return None
+    if not isinstance(section, dict):
+        raise MachineConfigUnreadable("machine-root local_runtime is not a mapping")
+    if "generation_slots" not in section:
+        return None
+    return resolve_generation_slots(section.get("generation_slots"))
 
 
 def resolve_generation_slots(value: object) -> int | None:

@@ -157,8 +157,16 @@ def test_router_argv_does_not_carry_the_slot_pin(tmp_path, monkeypatch):
     assert with_programmatic.router_argv()[-2:] == ["--parallel", "1"]
 
 
-def test_boot_forwards_one_slot_and_drops_yaml_extra_args(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+def _root_config(home, text: str) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(text, encoding="utf-8")
+
+
+def test_boot_reads_the_machine_root_and_drops_yaml_extra_args(tmp_path, monkeypatch):
+    """The caller's generation_slots is not the launch value. Root is."""
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _root_config(home, "local_runtime:\n  generation_slots: 1\n")
     from hermes_cli.local_runtime import binaries, bootstrap
     from hermes_cli.local_runtime import endpoint
 
@@ -201,7 +209,7 @@ def test_boot_forwards_one_slot_and_drops_yaml_extra_args(tmp_path, monkeypatch)
         started = bootstrap.ensure_local_runtime({
             "local_runtime": {
                 "enabled": True,
-                "generation_slots": 1,
+                "generation_slots": 4,
                 "extra_args": ["--parallel", "1", "--ctx-size", "1"],
             },
         })
@@ -214,19 +222,59 @@ def test_boot_forwards_one_slot_and_drops_yaml_extra_args(tmp_path, monkeypatch)
     assert "extra_args" not in seen["supervisor"]
 
 
-def test_boot_refuses_an_invalid_slot_count_before_spawn(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+def test_boot_refuses_an_invalid_root_slot_count_before_spawn(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _root_config(home, "local_runtime:\n  generation_slots: 4\n")
     from hermes_cli.local_runtime import bootstrap
 
     monkeypatch.setattr(bootstrap, "_SUPERVISOR", None)
+    monkeypatch.setattr(bootstrap, "_rejected_generation_slots_token", None)
     constructed: list = []
     monkeypatch.setattr(
         "hermes_cli.local_runtime.supervisor.LlamaServerSupervisor",
         lambda *_a, **_k: constructed.append(1))
 
     assert bootstrap.ensure_local_runtime(
-        {"local_runtime": {"enabled": True, "generation_slots": 4}}) is None
+        {"local_runtime": {"enabled": True, "generation_slots": 1}}) is None
     assert constructed == []
+
+
+def test_profile_config_cannot_override_or_hide_the_root_slot_count(tmp_path, monkeypatch):
+    """A profile file and a caller dict disagree with the machine root.
+
+    Curator and other profile-scoped turns load their own config. The shared
+    server still uses the root key, and the idle reader uses that same key.
+    """
+    from hermes_constants import (
+        get_hermes_home, reset_hermes_home_override, set_hermes_home_override)
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.local_runtime.generation_slots import machine_generation_slots
+
+    root = tmp_path / "root"
+    profile = root / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    (root / "config.yaml").write_text(
+        "local_runtime:\n  generation_slots: 1\n", encoding="utf-8")
+    (profile / "config.yaml").write_text(
+        "local_runtime:\n  generation_slots: 4\nmodel:\n  provider: custom\n",
+        encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    token = set_hermes_home_override(profile)
+    try:
+        assert get_hermes_home() == profile
+        profile_value = (load_config_readonly().get("local_runtime") or {}).get("generation_slots")
+        assert profile_value == 4
+        assert machine_generation_slots() == 1
+        assert get_hermes_home() == profile
+    finally:
+        reset_hermes_home_override(token)
+
+    from hermes_cli.local_runtime import bootstrap
+
+    monkeypatch.setattr(bootstrap, "_rejected_generation_slots_token", None)
+    slots, ok = bootstrap._running_generation_slots()
+    assert ok is True and slots == 1
 
 
 class _Router:
