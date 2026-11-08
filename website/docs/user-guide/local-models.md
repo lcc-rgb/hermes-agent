@@ -158,7 +158,27 @@ local_runtime:
   backend: auto      # auto | cuda | metal | vulkan | hip | cpu
   detect_ports: [8081]  # extra ports to probe for a llama-server you run
                         # yourself (the default probe is :8080 only)
+  # generation_slots: 1  # optional. Omit or null keeps llama.cpp's automatic
+                         # slot count. 1 asks each model for one generation
+                         # at a time and keeps unified KV. Any other value
+                         # refuses to start the managed server.
 ```
+
+`generation_slots: 1` is read when the managed server starts and again by the
+idle sweep, about every 30 seconds, while no model is loaded. The sweep
+rewrites `presets.ini` and tells the running router to reload it. Context,
+KV cache type, MTP or DFlash spec type, and the model path stay on the
+planner's decision. A loaded model blocks that reload; unload it first
+(Local Models eject, or the 15-minute idle unload). The next message loads
+the model child with the new preset.
+
+The process that owns the server has to already be running a build that
+contains this setting. The sweep is how a later edit takes effect. A value
+other than `1` or null is ignored by that sweep and the previous preset
+stays in place; a fresh boot refuses to start the managed server.
+
+`local_runtime` does not forward an `extra_args` list. Slot count is this
+field, not an arbitrary flag string.
 
 Running `llama-server` yourself on a fixed port works with the same
 `model.provider: llamacpp` selection — either list the port in

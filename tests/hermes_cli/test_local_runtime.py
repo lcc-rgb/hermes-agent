@@ -1005,7 +1005,7 @@ def test_boot_prices_the_engine_it_serves(tmp_path, monkeypatch):
                         lambda: {"local_runtime": {"backend": "cpu"}})  # another profile's config
     priced: list = []
 
-    def _priced(mdir, path, residents=1, engine_tag=None):
+    def _priced(mdir, path, residents=1, engine_tag=None, **_kw):
         priced.append((hardware._configured_engine(), engine_tag))
         return path
 

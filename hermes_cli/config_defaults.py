@@ -2693,7 +2693,9 @@ DEFAULT_CONFIG = {
         "region": "global",
     },
     # Managed llama.cpp runtime (docs: user-guide/local-models): official binaries, one supervised
-    # llama-server in router mode. No context/VRAM knobs by design.
+    # llama-server in router mode. Context, cache type, and model choice stay with the
+    # launch planner. generation_slots is the only opt-in for how many generations one
+    # loaded model accepts at once.
     "local_runtime": {
         # Off = detection-only (Hermes still finds an external llama-server you run).
         "enabled": False,
@@ -2702,6 +2704,9 @@ DEFAULT_CONFIG = {
         # cuda|metal|vulkan|hip|cpu.
         "backend": "auto",
         "models_max": 4,  # Router process: how many models may be resident at once.
+        # null = llama.cpp's automatic slot count (b11671: 4 slots and unified KV).
+        # 1 = one generation at a time, unified KV kept. Any other value refuses to boot.
+        "generation_slots": None,
         "port": 0,  # Port for the managed server. 0 = pick a free port at spawn.
         # Extra ports detection probes for an external llama-server (besides 8080).
         "detect_ports": [],
