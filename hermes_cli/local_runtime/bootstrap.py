@@ -233,7 +233,8 @@ def _admitted_models_max(mdir: Path, configured: int, engine_tag: str | None = N
 
 
 def _generate_presets(mdir: Path, preset_path: Path, residents: int = 1, *,
-                      engine_tag: str | None = None) -> Path | None:
+                      engine_tag: str | None = None,
+                      generation_slots: int | None = None) -> Path | None:
     """Write the launch-policy INI for every staged model; returns the path to hand the router.
 
     Priced against CAPACITY, not live free VRAM: this runs while the outgoing server instance may
@@ -255,7 +256,8 @@ def _generate_presets(mdir: Path, preset_path: Path, residents: int = 1, *,
     try:
         capacity = probe_budget(planning=True)
         for entry in generate_presets(mdir, capacity, preset_path, live=_launch_budget(capacity),
-                                      residents=residents, engine_tag=engine_tag):
+                                      residents=residents, engine_tag=engine_tag,
+                                      generation_slots=generation_slots):
             if entry.refusal:
                 logger.warning("model refused by physics check: %s", entry.refusal)
         return preset_path
@@ -287,6 +289,46 @@ def _launch_budget(capacity, own_bytes: int = 0):
 _HOLDS_MEMORY = frozenset({"loaded", "loading", "sleeping", "ready"})
 
 
+# Last rejected generation_slots repr we already logged. The idle sweep calls
+# back every 30s; one bad edit should not fill the log.
+_rejected_generation_slots_token: str | None = None
+# Distinct from None, which is a valid "automatic slots" setting.
+_APPLIED_SLOTS_UNSET = object()
+
+
+def _running_generation_slots() -> tuple[int | None, bool]:
+    """``(slots, usable)`` from the machine-root config, never the caller's profile.
+
+    A rejected or unreadable root file is ``(None, False)``: boot does not
+    start, and the idle sweep does not rewrite the preset. A missing file or
+    a missing key is null and usable (automatic slots).
+    """
+    global _rejected_generation_slots_token
+    from hermes_cli.local_runtime.generation_slots import (
+        GenerationSlotsError, MachineConfigUnreadable, machine_generation_slots)
+
+    try:
+        slots = machine_generation_slots()
+    except GenerationSlotsError as exc:
+        token = f"rejected:{exc}"
+        if token != _rejected_generation_slots_token:
+            logger.error("local_runtime.generation_slots in the machine-root "
+                         "config was rejected (%s); the running preset is unchanged "
+                         "and a new server is not started", exc)
+            _rejected_generation_slots_token = token
+        return None, False
+    except MachineConfigUnreadable as exc:
+        token = f"unreadable:{exc}"
+        if token != _rejected_generation_slots_token:
+            logger.error("machine-root config could not be read for "
+                         "generation_slots (%s); the running preset is unchanged "
+                         "and a new server is not started", exc)
+            _rejected_generation_slots_token = token
+        return None, False
+    _rejected_generation_slots_token = None
+    return slots, True
+
+
 def refit_idle_presets(sup) -> bool:
     """Re-plan launch windows against free GPU memory while no model is loaded.
 
@@ -295,6 +337,9 @@ def refit_idle_presets(sup) -> bool:
     new presets. A request that starts a load between the last status check and the reload is
     unloaded by the router and fails once; that gap is a few milliseconds, and only when a window
     changes.
+
+    Also re-reads ``local_runtime.generation_slots``. A change rewrites the preset even when free
+    memory has not moved, still only while nothing is loaded. A rejected value does not rewrite.
     """
     from hermes_cli.local_runtime.hardware import probe_budget
     from hermes_cli.local_runtime.presets import plan_presets, render_presets
@@ -302,21 +347,29 @@ def refit_idle_presets(sup) -> bool:
     path = sup.preset_path
     if path is None or not path.exists() or _any_holds_memory(sup):
         return False
+    slots, slots_ok = _running_generation_slots()
+    if not slots_ok:
+        return False
     capacity = probe_budget(planning=True)
     live = _launch_budget(capacity)
     if live is None:
         return False
+    slot_changed = getattr(sup, "_applied_generation_slots", _APPLIED_SLOTS_UNSET) != slots
     last = sup._refit_usable
-    if last is not None and abs(live.usable_vram_bytes - last) < _REFIT_STEP_BYTES:
+    if (not slot_changed and last is not None
+            and abs(live.usable_vram_bytes - last) < _REFIT_STEP_BYTES):
         return False
-    text = render_presets(plan_presets(models_dir(), capacity, live=live, residents=sup.models_max,
-                                       engine_tag=_SERVING_ENGINE.tag if _SERVING_ENGINE is not None else None))
+    text = render_presets(plan_presets(
+        models_dir(), capacity, live=live, residents=sup.models_max,
+        engine_tag=_SERVING_ENGINE.tag if _SERVING_ENGINE is not None else None,
+        generation_slots=slots))
     # Held across the write and the reload so a restart can't spawn between them; everything
     # slow ran above.
     with sup._lifecycle_lock:
         if sup.proc is None or sup.proc.poll() is not None or _any_holds_memory(sup):
             return False
         sup._refit_usable = live.usable_vram_bytes
+        sup._applied_generation_slots = slots
         if text == path.read_text(encoding="utf-8-sig"):
             return False
         from utils import atomic_write_text
@@ -417,6 +470,10 @@ def ensure_local_runtime(config: dict, force: bool = False) -> object | None:
     if _SUPERVISOR is not None:
         return _SUPERVISOR
 
+    generation_slots, slots_ok = _running_generation_slots()
+    if not slots_ok:
+        return None
+
     try:
         adopt_legacy_models()
     except OSError as exc:  # an unreadable profiles dir must not block serving what's staged
@@ -462,7 +519,8 @@ def ensure_local_runtime(config: dict, force: bool = False) -> object | None:
             mdir.mkdir(parents=True, exist_ok=True)
             models_max = _admitted_models_max(mdir, int(section.get("models_max", 4)), engine.tag)
             preset_path = _generate_presets(mdir, runtimes_root() / "presets.ini", models_max,
-                                            engine_tag=engine.tag)
+                                            engine_tag=engine.tag,
+                                            generation_slots=generation_slots)
 
             sup = LlamaServerSupervisor(engine.binary, mdir, preset_path=preset_path,
                                         models_max=models_max,

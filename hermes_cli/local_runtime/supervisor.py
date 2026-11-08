@@ -173,7 +173,8 @@ class LlamaServerSupervisor:
 
     # ── lifecycle ────────────────────────────────────────────
 
-    def _spawn(self) -> None:
+    def router_argv(self) -> list[str]:
+        """Argv of the router process. Slot count lives in the preset file, not here."""
         exe = self.binary
         cmd = [
             str(exe),
@@ -197,6 +198,11 @@ class LlamaServerSupervisor:
         else:
             cmd += ["--models-dir", str(self.models_dir)]
         cmd += self.extra_args
+        return cmd
+
+    def _spawn(self) -> None:
+        exe = self.binary
+        cmd = self.router_argv()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         if self._log_handle is not None:
             # The crash-restart loop calls _spawn repeatedly; each restart would leak one fd.

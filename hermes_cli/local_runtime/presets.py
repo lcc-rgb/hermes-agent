@@ -170,7 +170,8 @@ def _dflash_plan(entry, profile, budget: HardwareBudget, live: HardwareBudget | 
 def preset_for_model(gguf: Path, budget: HardwareBudget,
                      mtp_capable: set[str], *, requested_window: int | None = None,
                      live: HardwareBudget | None = None, residents: int = 1,
-                     engine_tag: str | None = None) -> PresetEntry | None:
+                     engine_tag: str | None = None,
+                     generation_slots: int | None = None) -> PresetEntry | None:
     """The launch decision for one staged model, or None when its header is unreadable.
 
     ``budget`` is the card's capacity; ``live`` (from ``hardware.launch_budget``) narrows the
@@ -257,6 +258,9 @@ def preset_for_model(gguf: Path, budget: HardwareBudget,
             keys["spec-type"] = "draft-dspark"
             # Unsloth's measured cliff: acceptance 83% at 2-3 drafts, collapses at 4.
             keys["spec-draft-n-max"] = "3"
+    from hermes_cli.local_runtime.generation_slots import apply_generation_slots
+
+    apply_generation_slots(keys, generation_slots)
     return PresetEntry(model_id=model_id, window=decision.window,
                        spilled=decision.spilled, keys=keys)
 
@@ -356,12 +360,13 @@ def admitted_residency_count(models_dir: Path, budget: HardwareBudget, configure
 
 def plan_presets(models_dir: Path, budget: HardwareBudget, mtp_capable: set[str] | None = None,
                  *, live: HardwareBudget | None = None, residents: int = 1,
-                 engine_tag: str | None = None) -> list[PresetEntry]:
+                 engine_tag: str | None = None,
+                 generation_slots: int | None = None) -> list[PresetEntry]:
     """The launch decision for every staged model; unreadable headers are skipped."""
     from hermes_cli.local_runtime.bootstrap import staged_in
 
     entries = (preset_for_model(gguf, budget, mtp_capable or set(), live=live, residents=residents,
-                                engine_tag=engine_tag)
+                                engine_tag=engine_tag, generation_slots=generation_slots)
                for gguf in staged_in(models_dir))
     return [entry for entry in entries if entry is not None]
 
@@ -369,11 +374,12 @@ def plan_presets(models_dir: Path, budget: HardwareBudget, mtp_capable: set[str]
 def generate_presets(models_dir: Path, budget: HardwareBudget, preset_path: Path,
                      mtp_capable: set[str] | None = None, *,
                      live: HardwareBudget | None = None, residents: int = 1,
-                     engine_tag: str | None = None) -> list[PresetEntry]:
+                     engine_tag: str | None = None,
+                     generation_slots: int | None = None) -> list[PresetEntry]:
     """Plan every staged model and write one INI. Refused models get no section (the picker
     surfaces the refusal from the returned entries)."""
     entries = plan_presets(models_dir, budget, mtp_capable, live=live, residents=residents,
-                           engine_tag=engine_tag)
+                           engine_tag=engine_tag, generation_slots=generation_slots)
     write_presets(entries, preset_path)
     return entries
 
